@@ -227,14 +227,14 @@ def load_posture_model(path: str, index_model: int):
                 def forward(self, x):
                     x = self.conv1(x)
                     x = self.bn1(x)
-                    x = F.relu(x)
+                    x = torch.relu(x)
                     x = self.pool1(x)
 
                     x = self.spatial_dropout1(x)
 
                     x = self.conv2(x)
                     x = self.bn2(x)
-                    x = F.relu(x)
+                    x = torch.relu(x)
                     x = self.pool2(x)
 
                     x = self.spatial_dropout2(x)
@@ -243,7 +243,7 @@ def load_posture_model(path: str, index_model: int):
                     x = torch.flatten(x, 1)
 
                     x = self.fc1(x)
-                    x = F.relu(x)
+                    x = torch.relu(x)
                     x = self.dropout(x)
 
                     x = self.fc2(x)
