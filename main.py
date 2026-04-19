@@ -12,6 +12,10 @@ from torchvision.models.detection import (
     KeypointRCNN_ResNet50_FPN_Weights,
 )
 
+# GCN Specific imports
+from torch_geometric.data import Data
+from torch_geometric.nn import GCNConv
+
 # CUDA / CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -192,7 +196,45 @@ def load_posture_model(path: str, index_model: int):
             net.to(device).eval()
             return net
         case 2:            
-            return None
+            class GCN_model(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.conv1 = GCNConv(3, 8)
+                    self.bn1 = nn.BatchNorm1d(8)
+                    self.conv2 = GCNConv(8, 16)
+                    self.bn2 = nn.BatchNorm1d(16)
+
+                    self.fc1 = nn.Linear(17 * 16, 32)
+                    
+                    self.dropout = nn.Dropout(0.5)
+                    
+                    self.fc2 = nn.Linear(32, 1)
+
+                    self.relu = nn.ReLU()
+
+                def forward(self, data):
+                    x, edge_index = data.x, data.edge_index
+                    x = self.relu(self.bn1(self.conv1(x, edge_index)))
+                    x = self.relu(self.bn2(self.conv2(x, edge_index)))
+
+                    ####################################
+                    # Generated from Gemini
+                    ####################################
+                    
+                    x = x.view(-1, 17 * 16)
+
+                    ####################################
+                    # End
+                    ####################################
+                    x = self.relu(self.fc1(x))
+                    x = self.dropout(x)
+                    out = self.fc2(x)
+                    return out
+                
+            net = GCN_model()
+            net.load_state_dict(torch.load(path, map_location=device))
+            net.to(device).eval()
+            return net
         case 3:
             return None
 
@@ -219,59 +261,92 @@ def extract_keypoint(img, model, device):
 
 def normalize_coco_posture_safe(pos_tensor):
     """
-    Safely normalizes a [17, 2] COCO keypoint tensor, ignoring -1.0 missing values.
+    Safely normalizes a [17, 3] COCO keypoint tensor using the Visibility flag.
     """
-    # Clone to avoid modifying the original data in-place
-    norm_pos = pos_tensor.clone()
+    coords = pos_tensor[:, :2].clone() # [17, 2]
+    vis = pos_tensor[:, 2].clone()     # [17]
     
-    # 1. Create a Boolean Mask for valid points
-    # (Assuming if X is -1.0, the whole joint is missing)
-    valid_mask = norm_pos[:, 0] != -1.0 
+    valid_mask = vis > 0.0 
     
-    # If the skeleton is entirely missing (all -1.0), return as-is
     if not valid_mask.any():
-        return norm_pos
+        return pos_tensor
 
-    # 2. Safe Mid-Hip Calculation with Fallbacks
     l_hip_valid = valid_mask[11].item()
     r_hip_valid = valid_mask[12].item()
     
     if l_hip_valid and r_hip_valid:
-        root = (norm_pos[11] + norm_pos[12]) / 2.0
+        root = (coords[11] + coords[12]) / 2.0
     elif l_hip_valid:
-        root = norm_pos[11]  # Fallback to Left Hip only
+        root = coords[11] 
     elif r_hip_valid:
-        root = norm_pos[12]  # Fallback to Right Hip only
+        root = coords[12] 
     else:
-        # Emergency Fallback: If both hips are missing, try the Shoulders (5, 6)
         l_sho_valid = valid_mask[5].item()
         r_sho_valid = valid_mask[6].item()
         if l_sho_valid and r_sho_valid:
-            root = (norm_pos[5] + norm_pos[6]) / 2.0
+            root = (coords[5] + coords[6]) / 2.0
         else:
-            root = torch.tensor([0.0, 0.0]) # Give up centering, just scale it
+            root = torch.tensor([0.0, 0.0], device=coords.device)
 
-    # 3. Apply Centering ONLY to valid points
-    # The -1.0 points remain entirely untouched
-    norm_pos[valid_mask] = norm_pos[valid_mask] - root
+    coords[valid_mask] = coords[valid_mask] - root
     
-    # 4. Aspect-Preserving Scale ONLY on valid points
-    min_vals = norm_pos[valid_mask].min(dim=0)[0]
-    max_vals = norm_pos[valid_mask].max(dim=0)[0]
+    min_vals = coords[valid_mask].min(dim=0)[0]
+    max_vals = coords[valid_mask].max(dim=0)[0]
     ranges = max_vals - min_vals
     global_scale = ranges.max()
     
-    # Scale valid points. Add epsilon to prevent division by zero
-    norm_pos[valid_mask] = norm_pos[valid_mask] / (global_scale + 1e-6)
+    coords[valid_mask] = coords[valid_mask] / (global_scale + 1e-6)
     
-    return norm_pos
+    final_tensor = torch.cat([coords, vis.unsqueeze(1)], dim=1)
+    return final_tensor
 
 # Build input for model -- Normalize ipnut
+def build_input(kp: np.ndarray, index_model: int, device):
+    """
+    Dynamically builds the input based on the selected model.
+    kp : (17, 3) pixel coords (x, y, visibility)
+    """
+    # 1. Convert to tensor and apply the new 3-feature normalization
+    kp_tensor = torch.tensor(kp, dtype=torch.float32)
+    norm_tensor = normalize_coco_posture_safe(kp_tensor)
+    
+    if index_model == 0:
+        # Strip the visibility column to get [17, 2]
+        xy_only = norm_tensor[:, :2] 
+        # Flatten to [1, 34] for the Linear layers
+        flat_tensor = xy_only.flatten().unsqueeze(0)
+        return flat_tensor.to(device)
+    
+    elif index_model == 1:
+        # Strip the visibility column to get [17, 2]
+        xy_only = norm_tensor[:, :2] 
+        # Flatten to [1, 34] for the Linear layers
+        flat_tensor = xy_only.flatten().unsqueeze(0)
+        return flat_tensor.to(device)
+    
+    elif index_model == 2:
+        skeleton_edges = [
+            [0, 1], [0, 2], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5,6], [5, 7], 
+            [5, 11], [6, 12], [6, 8], [7, 9], [8, 10], [11, 12], [13, 11], 
+            [14, 12], [15, 13], [16, 14]
+        ]
+        source, destination = [], []
+        for u, v in skeleton_edges:
+            source.extend([u, v])
+            destination.extend([v, u])
+            
+        edge_index = torch.tensor([source, destination], dtype=torch.long)
+        
+        # Create PyG Data object
+        data = Data(x=norm_tensor, edge_index=edge_index)
+        return data.to(device)
+
+"""
 def build_input(kp: np.ndarray, W: int, H: int):
-    """
-    kp : (17, 3) pixel coords (x,y,v) -> 34 keypoint, v ignore
-    return ()
-    """
+    
+    #kp : (17, 3) pixel coords (x,y,v) -> 34 keypoint, v ignore
+    #return ()
+    
     # xy = kp[:, :2]
     xy_tensor = torch.tensor(kp)[:, :2]
     norm_xy = normalize_coco_posture_safe(xy_tensor.float())
@@ -280,14 +355,43 @@ def build_input(kp: np.ndarray, W: int, H: int):
     # xy = xy.flatten()
     # return torch.tensor(xy, dtype=torch.float32).unsqueeze(0)
     return torch.tensor(norm_xy.flatten(), dtype=torch.float32).detach().unsqueeze(0)
-
-# Posture prediction
+""" 
 def prediction(model, data):
     """
-    data : torch.FloatTensor (1, 34)
-    Returns (label, confidence_0_to_1).
-    output  — ≥ 0.5 → Good
+    data: Either a flat Tensor (for MLP) or a PyG Data object (for GCN)
     """
+    with torch.inference_mode():
+        output = model(data)
+
+    if output.shape[-1] == 1:
+        prob = output.item()
+        
+        if prob < 0.0 or prob > 1.0:
+            prob = torch.sigmoid(output).item()
+            
+        label = "Good" if prob >= 0.5 else "Bad"
+        conf = prob if prob >= 0.5 else 1.0 - prob 
+
+    else:
+        # Convert raw logits to percentages (0 to 1)
+        probs = torch.softmax(output, dim=-1).squeeze()
+        
+        # Find which class has the higher percentage
+        pred_class = torch.argmax(probs).item()
+        
+        # NOTE: Assumes Class 0 is "Good". Change this if your dataset is flipped!
+        label = "Good" if pred_class == 1 else "Bad"
+        conf = probs[pred_class].item()
+
+    return label, conf
+"""
+# Posture prediction
+def prediction(model, data):
+    
+    #data : torch.FloatTensor (1, 34)
+    #Returns (label, confidence_0_to_1).
+    #output  — ≥ 0.5 → Good
+
     with torch.inference_mode():
         output = model(data)
 
@@ -297,10 +401,12 @@ def prediction(model, data):
         conf  = prob if prob >= 0.5 else 1.0 - prob 
 
     return label, conf
+"""
 
 ############################ 
 # Generated from Claude
 ############################
+
 # Draw Skeleton on Frame
 def draw_skeleton(frame, kp, label):
     #Colors
@@ -330,7 +436,8 @@ with st.sidebar:
     # !!!!!!!!!!!!!!! Add ur model path here
     model_list = [
         "mlp_batch_model.pth",
-        "mlp_norm_best_model.pth"
+        "mlp_norm_best_model.pth",
+        "gcn_model.pth"
     ]
     model_path = st.selectbox(
         "Change model here:",
