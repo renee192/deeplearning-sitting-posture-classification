@@ -95,15 +95,10 @@ parts = [
     "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-COCO_SKELETON_0_INDEXED = [
-    (1, 0), (2, 0),
-    (3, 1), (4, 2),
-    (5, 6),
-    (5, 7), (6, 8),
-    (7, 9), (8, 10),
-    (5, 11), (6, 12),
-    (11, 13), (12, 14),
-    (13, 15), (14, 16)
+skeleton_edges = [
+    [0, 1], [0, 2], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5,6], [5, 7], 
+    [5, 11], [6, 12], [6, 8], [7, 9], [8, 10], [11, 12], [13, 11], 
+    [14, 12], [15, 13], [16, 14]
 ]
 
 # Keypoint R-CNN
@@ -120,36 +115,7 @@ def load_posture_model(path: str, index_model: int):
     match index_model:
         # MLP
         case 0:
-            # DEBUG: Change network
             class MLP(nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    self.layer1 = nn.Sequential(
-                        nn.Linear(in_features=34, out_features=64),
-                        nn.BatchNorm1d(64),
-                        nn.ReLU()
-                    )
-                    self.layer2 = nn.Sequential(
-                        nn.Linear(in_features=64, out_features=32),
-                        nn.BatchNorm1d(32),
-                        nn.ReLU()
-                    )
-                    self.outputlayer = nn.Linear(in_features=32, out_features=1)
-                    self.sigmoid = nn.Sigmoid()
-
-                def forward(self, x):
-                    x = self.layer1(x)
-                    x = self.layer2(x)
-                    x = self.outputlayer(x)
-                    return self.sigmoid(x)
-    
-            net = MLP()
-            net.load_state_dict(torch.load(path, map_location=device))
-            net.to(device).eval()
-            return net
-        case 1:
-            #Add Dropout???
-            class MLP2(nn.Module):
                 def __init__(self):
                     """
                     Create a Fully Connected Neuron Network
@@ -157,7 +123,7 @@ def load_posture_model(path: str, index_model: int):
                     """
                     super().__init__()
                     self.layer1 = nn.Sequential(
-                        nn.Linear(in_features=34, out_features=128),
+                        nn.Linear(in_features=51, out_features=128),
                         nn.BatchNorm1d(128),
                         nn.LeakyReLU(0.1),
                         nn.Dropout(0.5),
@@ -190,12 +156,12 @@ def load_posture_model(path: str, index_model: int):
                     x = self.sigmoid(x)
 
                     return x
-                
-            net = MLP2()
+    
+            net = MLP()
             net.load_state_dict(torch.load(path, map_location=device))
             net.to(device).eval()
             return net
-        case 2:            
+        case 1:            
             class GCN_model(nn.Module):
                 def __init__(self):
                     super().__init__()
@@ -235,6 +201,8 @@ def load_posture_model(path: str, index_model: int):
             net.load_state_dict(torch.load(path, map_location=device))
             net.to(device).eval()
             return net
+        case 2:
+            return None
         case 3:
             return None
 
@@ -311,20 +279,11 @@ def build_input(kp: np.ndarray, index_model: int, device):
     norm_tensor = normalize_coco_posture_safe(kp_tensor)
     
     if index_model == 0:
-        # Strip the visibility column to get [17, 2]
-        xy_only = norm_tensor[:, :2] 
         # Flatten to [1, 34] for the Linear layers
-        flat_tensor = xy_only.flatten().unsqueeze(0)
+        flat_tensor = norm_tensor.flatten().unsqueeze(0)
         return flat_tensor.to(device)
     
     elif index_model == 1:
-        # Strip the visibility column to get [17, 2]
-        xy_only = norm_tensor[:, :2] 
-        # Flatten to [1, 34] for the Linear layers
-        flat_tensor = xy_only.flatten().unsqueeze(0)
-        return flat_tensor.to(device)
-    
-    elif index_model == 2:
         skeleton_edges = [
             [0, 1], [0, 2], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5,6], [5, 7], 
             [5, 11], [6, 12], [6, 8], [7, 9], [8, 10], [11, 12], [13, 11], 
@@ -341,21 +300,6 @@ def build_input(kp: np.ndarray, index_model: int, device):
         data = Data(x=norm_tensor, edge_index=edge_index)
         return data.to(device)
 
-"""
-def build_input(kp: np.ndarray, W: int, H: int):
-    
-    #kp : (17, 3) pixel coords (x,y,v) -> 34 keypoint, v ignore
-    #return ()
-    
-    # xy = kp[:, :2]
-    xy_tensor = torch.tensor(kp)[:, :2]
-    norm_xy = normalize_coco_posture_safe(xy_tensor.float())
-    # xy[:, 0] /= W
-    # xy[:, 1] /= H
-    # xy = xy.flatten()
-    # return torch.tensor(xy, dtype=torch.float32).unsqueeze(0)
-    return torch.tensor(norm_xy.flatten(), dtype=torch.float32).detach().unsqueeze(0)
-""" 
 def prediction(model, data):
     """
     data: Either a flat Tensor (for MLP) or a PyG Data object (for GCN)
@@ -384,24 +328,7 @@ def prediction(model, data):
         conf = probs[pred_class].item()
 
     return label, conf
-"""
-# Posture prediction
-def prediction(model, data):
-    
-    #data : torch.FloatTensor (1, 34)
-    #Returns (label, confidence_0_to_1).
-    #output  — ≥ 0.5 → Good
 
-    with torch.inference_mode():
-        output = model(data)
-
-    if output.shape[-1] == 1: # confirm output is ( _ , 1 )
-        prob  = output.item()
-        label = "Good" if prob >= 0.5 else "Bad"
-        conf  = prob if prob >= 0.5 else 1.0 - prob 
-
-    return label, conf
-"""
 
 ############################ 
 # Generated from Claude
@@ -415,7 +342,7 @@ def draw_skeleton(frame, kp, label):
     KP   = (255, 210,  50)
     edge = GOOD if label == "Good" else (BAD if label == "Bad" else (120, 140, 180))
 
-    for i, j in COCO_SKELETON_0_INDEXED:
+    for i, j in skeleton_edges:
         xi, yi, vi = kp[i]; xj, yj, vj = kp[j]
         if vi > 0.9 and vj > 0.9:
             cv2.line(frame, (int(xi), int(yi)), (int(xj), int(yj)),
@@ -435,8 +362,7 @@ with st.sidebar:
     st.divider()
     # !!!!!!!!!!!!!!! Add ur model path here
     model_list = [
-        "mlp_batch_model.pth",
-        "mlp_norm_best_model.pth",
+        "mlp_latest_norm_best_model.pth",
         "gcn_model.pth"
     ]
     model_path = st.selectbox(
@@ -537,7 +463,7 @@ if st.session_state.running:
                 last_kps = kp
                 if posture_model is not None:
                     try:
-                        input = build_input(kp, W, H)
+                        input = build_input(kp, index_model, device)
                         input = input.to(device)
                         lbl, conf  = prediction(posture_model, input)
                         last_label = lbl
