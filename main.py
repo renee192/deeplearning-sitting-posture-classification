@@ -162,7 +162,6 @@ def load_posture_model(path: str, index_model: int):
                     x = self.layer2(x)
                     x = self.layer3(x)
                     x = self.outputlayer(x)
-                    x = self.sigmoid(x)
 
                     return x
     
@@ -464,7 +463,7 @@ with st.sidebar:
     st.divider()
     # !!!!!!!!!!!!!!! Add ur model path here
     model_list = [
-        "mlp_latest_norm_best_model.pth",
+        "MLP.pth",
         "gcn_model.pth",
         "1dcnn_best_model.pth"
     ]
